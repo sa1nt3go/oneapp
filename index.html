@@ -1,88 +1,255 @@
-<!DOCTYPE html>
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>APK Share App</title>
+  <title>APK Share from URL</title>
   <style>
     body {
       font-family: Arial, sans-serif;
       padding: 20px;
       max-width: 600px;
       margin: 0 auto;
+      line-height: 1.6;
+      transition: background-color 0.3s, color 0.3s;
     }
-    input, button {
+    body.light {
+      background-color: #ffffff;
+      color: #000000;
+    }
+    body.dark {
+      background-color: #333333;
+      color: #ffffff;
+    }
+    h1 {
+      font-size: 1.5em;
+    }
+    input, select, button {
       margin: 10px 0;
       padding: 10px;
       width: 100%;
+      box-sizing: border-box;
+    }
+    button {
+      background-color: #007bff;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #0056b3;
     }
     #output {
       margin-top: 20px;
       white-space: pre-wrap;
+      border: 1px solid #ccc;
+      padding: 10px;
     }
     .history-item {
       border-bottom: 1px solid #ccc;
       padding: 10px 0;
     }
   </style>
+  <link rel="manifest" href="/apk-share/manifest.json">
 </head>
 <body>
-  <h1>APK Share App</h1>
-  <input type="file" id="apkInput" accept=".apk">
-  <button onclick="saveApk()">Сохранить APK</button>
-  <button onclick="shareApk()">Поделиться последним APK</button>
-  <button onclick="showHistory()">Показать историю загрузок</button>
+  <h1>APK Share from URL</h1>
+  <p>Завантажте, проаналізуйте та встановіть APK через системний інсталятор.</p>
+  <select id="apkSelect">
+    <option value="">Виберіть APK або введіть URL</option>
+    <option value="https://example.com/app1.apk">Test App 1</option>
+    <option value="https://example.com/app2.apk">Test App 2</option>
+  </select>
+  <input type="text" id="apkUrl" placeholder="Введіть URL APK (тільки HTTPS)">
+  <button id="downloadBtn">Завантажити і зберегти APK</button>
+  <button id="proxyBtn">Завантажити через проксі (CORS)</button>
+  <select id="openAppSelect">
+    <option value="file">Файловий менеджер (Google Files, Файли)</option>
+    <option value="installer">Package Installer</option>
+    <option value="other">Інше додаток</option>
+  </select>
+  <button id="openBtn">Відкрити останній APK</button>
+  <button id="shareBtn">Поділитися останнім APK</button>
+  <button id="analyzeBtn">Аналізувати останній APK</button>
+  <button id="cleanBtn">Очистити сховище</button>
+  <button id="themeToggle">Змінити тему</button>
+  <button id="historyBtn">Показати історію</button>
   <div id="output"></div>
 
   <script type="module">
-    // Импорт библиотеки idb для упрощения работы с IndexedDB
-    import { openDB } from 'https://unpkg.com/idb@7.0.0/build/esm/index.js';
+    import { openDB } from 'https://cdn.jsdelivr.net/npm/idb@8.0.0/+esm';
+    import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
+    import CryptoJS from 'https://cdn.jsdelivr.net/npm/crypto-js@4.1.1/+esm';
 
-    const apkInput = document.getElementById('apkInput');
+    const apkUrlInput = document.getElementById('apkUrl');
+    const apkSelect = document.getElementById('apkSelect');
+    const openAppSelect = document.getElementById('openAppSelect');
     const output = document.getElementById('output');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const proxyBtn = document.getElementById('proxyBtn');
+    const openBtn = document.getElementById('openBtn');
+    const shareBtn = document.getElementById('shareBtn');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const cleanBtn = document.getElementById('cleanBtn');
+    const themeToggle = document.getElementById('themeToggle');
+    const historyBtn = document.getElementById('historyBtn');
 
-    // Открытие или создание базы данных IndexedDB
-    async function getDB() {
-      return await openDB('apkDB', 1, {
-        upgrade(db) {
-          // Хранилище для APK-файлов
-          db.createObjectStore('apks', { keyPath: 'name' });
-          // Хранилище для истории загрузок
-          db.createObjectStore('history', { autoIncrement: true });
-        },
-      });
+    function log(message) {
+      console.log(`[APK Share] ${message}`);
+      output.textContent = message;
     }
 
-    // Сохранение APK в IndexedDB
-    async function saveApk() {
-      const file = apkInput.files[0];
-      if (!file || file.type !== 'application/vnd.android.package-archive') {
-        output.textContent = 'Пожалуйста, выберите действительный APK-файл';
+    function applyTheme(theme) {
+      document.body.className = theme;
+      localStorage.setItem('theme', theme);
+    }
+
+    function getTheme() {
+      return localStorage.getItem('theme') || 'light';
+    }
+
+    async function getDB() {
+      try {
+        log('Відкриття IndexedDB...');
+        return await openDB('apkDB', 1, {
+          upgrade(db) {
+            db.createObjectStore('apks', { keyPath: 'name' });
+            db.createObjectStore('history', { autoIncrement: true });
+          },
+        });
+      } catch (error) {
+        log(`Помилка IndexedDB: ${error.message}`);
+        throw error;
+      }
+    }
+
+    async function downloadAndSaveApk(url, useProxy = false) {
+      if (!url || !url.startsWith('https://')) {
+        log('Введіть дійсний HTTPS URL APK');
         return;
       }
 
+      log('Завантаження APK...');
       try {
-        const db = await getDB();
-        // Сохранение файла
-        await db.put('apks', { name: file.name, data: file });
-        // Сохранение в историю
-        await db.add('history', {
-          name: file.name,
-          size: file.size,
-          date: new Date(),
+        const fetchUrl = useProxy ? `https://cors-anywhere.herokuapp.com/${url}` : url;
+        const response = await fetch(fetchUrl, {
+          headers: { 'Accept': 'application/vnd.android.package-archive' },
         });
-        output.textContent = APK сохранен: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} МБ);
+
+        if (!response.ok) {
+          throw new Error(`HTTP помилка: ${response.status}`);
+        }
+
+        const contentLength = response.headers.get('content-length');
+        let received = 0;
+        const chunks = [];
+        const reader = response.body.getReader();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          if (contentLength) {
+            log(`Завантажено: ${(received / contentLength * 100).toFixed(2)}%`);
+          }
+        }
+
+        const blob = new Blob(chunks);
+        if (blob.size > 100 * 1024 * 1024) {
+          log('APK занадто великий (>100 МБ). Завантажте напряму.');
+          const a = document.createElement('a');
+          a.href = url;
+          a.textContent = 'Завантажити APK';
+          a.target = '_blank';
+          output.appendChild(a);
+          return;
+        }
+
+        const fileName = url.split('/').pop() || 'app.apk';
+        const file = new File([blob], fileName, {
+          type: 'application/vnd.android.package-archive',
+        });
+
+        // Використовуємо унікальну змінну для FileReader
+        const fileReader = new FileReader();
+        fileReader.onload = async () => {
+          const encrypted = CryptoJS.AES.encrypt(fileReader.result, 'secret-key').toString();
+          const db = await getDB();
+          await db.put('apks', { name: fileName, data: encrypted });
+          await db.add('history', {
+            name: fileName,
+            size: file.size,
+            url,
+            date: new Date(),
+          });
+          log(`APK зашифровано і збережено: ${fileName} (${(file.size / 1024 / 1024).toFixed(2)} МБ)`);
+        };
+        fileReader.readAsDataURL(file);
       } catch (error) {
-        output.textContent = Ошибка сохранения: ${error.message};
+        log(`Помилка: ${error.message}\nСпробуйте завантажити через проксі або напряму: ${url}`);
+        const a = document.createElement('a');
+        a.href = url;
+        a.textContent = 'Завантажити APK';
+        a.target = '_blank';
+        output.appendChild(a);
       }
     }
 
-    // Передача последнего APK через Web Share API
-    async function shareApk() {
-      // Проверка поддержки Web Share API
+    async function decryptApk(encryptedData) {
+      try {
+        const decrypted = CryptoJS.AES.decrypt(encryptedData, 'secret-key').toString(CryptoJS.enc.Utf8);
+        const blob = await (await fetch(decrypted)).blob();
+        return blob;
+      } catch (error) {
+        log(`Помилка розшифрування: ${error.message}`);
+        throw error;
+      }
+    }
+
+    async function openLastApk() {
       if (!navigator.share || !navigator.canShare) {
-        output.textContent = 'Web Share API не поддерживается. Попробуйте скачать файл.';
-        await downloadLastApk(); // Альтернатива
+        log('Web Share API не підтримується. Завантаження файлу...');
+        await downloadLastApk();
         return;
       }
 
@@ -90,50 +257,132 @@
         const db = await getDB();
         const apks = await db.getAll('apks');
         if (!apks.length) {
-          output.textContent = 'Нет сохраненных APK';
+          log('Немає збережених APK. Завантажте APK за URL.');
           return;
         }
 
-        const lastApk = apks[apks.length - 1]; // Последний загруженный APK
-        const file = new File([lastApk.data], lastApk.name, {
-          type: 'application/vnd.android.package-archive',
+        const lastApk = apks[apks.length - 1];
+        const decryptedBlob = await decryptApk(lastApk.data);
+        const file = new File([decryptedBlob], lastApk.name, {
+          type: 'application/octet-stream', // Альтернативний MIME для уникнення завантаження
         });
 
-        // Проверка возможности передачи файла
         if (!navigator.canShare({ files: [file] })) {
-          output.textContent = 'Передача файлов не поддерживается. Попробуйте скачать файл.';
+          log('Передача файлів не підтримується. Завантаження файлу...');
           await downloadLastApk();
           return;
         }
 
-        // Передача через Web Share API
-        await navigator.share({
-          files: [file],
-          title: Установить ${file.name},
-          text: Установите приложение ${file.name} на ваше устройство,
-        });
-        output.textContent = APK ${file.name} передан в системный интерфейс. Выберите "Package Installer" для установки.;
-      } catch (error) {
-        if (error.name === 'AbortError') {
-          output.textContent = 'Обмен отменен пользователем';
-        } else {
-          output.textContent = Ошибка: ${error.message};
-          await downloadLastApk(); // Альтернатива при ошибке
+        const appType = openAppSelect.value;
+        let shareTitle, shareText, alertMessage, fallbackUrl;
+        switch (appType) {
+          case 'file':
+            shareTitle = `Відкрити ${file.name} у файловому менеджері`;
+            shareText = `Перевірте APK ${file.name} у файловому менеджері (наприклад, Google Files)`;
+            alertMessage = 'Виберіть файловий менеджер, наприклад, "Google Files" або "Файли".\nЯкщо не бачите, встановіть Google Files або виберіть "Інше".';
+            fallbackUrl = 'content://com.google.android.apps.documents/*';
+            break;
+          case 'installer':
+            shareTitle = `Відкрити ${file.name} у Package Installer`;
+            shareText = `Перевірте APK ${file.name} у Package Installer`;
+            alertMessage = 'Виберіть "Package Installer".\nПереконайтеся, що дозволена установка з невідомих джерел.';
+            fallbackUrl = null;
+            break;
+          case 'other':
+          default:
+            shareTitle = `Відкрити ${file.name}`;
+            shareText = `Перевірте APK ${file.name} у додатку на ваш вибір`;
+            alertMessage = 'Виберіть додаток для перевірки (наприклад, файловий менеджер або аналізатор).';
+            fallbackUrl = null;
+            break;
         }
+
+        try {
+          await navigator.share({
+            files: [file],
+            title: shareTitle,
+            text: shareText,
+          });
+          log(`APK ${file.name} передано для відкриття.\nПеревірте файл і поверніться для установки.`);
+          alert(alertMessage);
+        } catch (shareError) {
+          if (shareError.name === 'AbortError') {
+            log('Дія скасована');
+          } else {
+            log(`Помилка Web Share: ${shareError.message}`);
+            if (appType === 'file' && fallbackUrl) {
+              log('Спроба відкрити в Google Files через URL-схему...');
+              try {
+                window.location = fallbackUrl;
+                log('Відкрито файловий менеджер (Google Files). Перевірте APK.');
+                alert('Перевірте Google Files. Якщо не відкрилось, завантажте файл.');
+              } catch (urlError) {
+                log(`Помилка URL-схеми: ${urlError.message}`);
+                await downloadLastApk();
+              }
+            } else {
+              await downloadLastApk();
+            }
+          }
+        }
+      } catch (error) {
+        log(`Помилка відкриття: ${error.message}`);
+        await downloadLastApk();
       }
     }
-// Альтернатива: скачивание APK, если Web Share API не работает
+
+    async function shareLastApk() {
+      if (!navigator.share || !navigator.canShare) {
+        log('Web Share API не підтримується');
+        await downloadLastApk();
+        return;
+      }
+
+      try {
+        const db = await getDB();
+        const apks = await db.getAll('apks');
+        if (!apks.length) {
+          log('Немає збережених APK. Завантажте APK за URL.');
+          return;
+        }
+
+        const lastApk = apks[apks.length - 1];
+        const decryptedBlob = await decryptApk(lastApk.data);
+        const file = new File([decryptedBlob], lastApk.name, {
+          type: 'application/vnd.android.package-archive',
+        });
+
+        if (!navigator.canShare({ files: [file] })) {
+          log('Передача файлів не підтримується');
+          await downloadLastApk();
+          return;
+        }
+
+        await navigator.share({
+          files: [file],
+          title: `Встановити ${file.name}`,
+          text: `Встановіть ${file.name}`,
+        });
+        log(`APK ${file.name} передано.\nВиберіть "Package Installer" для установки.\nПеревірте налаштування "Установка з невідомих джерел".`);
+        alert('Виберіть "Package Installer" для установки.');
+      } catch (error) {
+        log(error.name === 'AbortError' ? 'Обмін скасовано' : `Помилка: ${error.message}`);
+        await downloadLastApk();
+      }
+    }
+
     async function downloadLastApk() {
       try {
         const db = await getDB();
         const apks = await db.getAll('apks');
         if (!apks.length) {
-          output.textContent = 'Нет сохраненных APK для скачивания';
+          log('Немає збережених APK');
           return;
         }
 
         const lastApk = apks[apks.length - 1];
-        const file = new File([lastApk.data], lastApk.name, {
+        const decryptedBlob = await decryptApk(lastApk.data);
+        const file = new File([decryptedBlob], lastApk.name, {
           type: 'application/vnd.android.package-archive',
         });
 
@@ -143,42 +392,111 @@
         a.download = file.name;
         a.click();
         URL.revokeObjectURL(url);
-        output.textContent += '\nAPK скачан. Откройте файл в "Загрузках" для установки.';
+        log('APK завантажено. Відкрийте у "Завантаженнях" або файловому менеджері (наприклад, Google Files).');
+        alert('Файл завантажено в "Завантаження". Відкрийте у Google Files або Package Installer.');
       } catch (error) {
-        output.textContent = Ошибка скачивания: ${error.message};
+        log(`Помилка завантаження: ${error.message}`);
       }
     }
 
-    // Показ истории загрузок
+    async function analyzeApk() {
+      try {
+        const db = await getDB();
+        const apks = await db.getAll('apks');
+        if (!apks.length) {
+          log('Немає збережених APK');
+          return;
+        }
+
+        const lastApk = apks[apks.length - 1];
+        const decryptedBlob = await decryptApk(lastApk.data);
+        const zip = new JSZip();
+        const content = await zip.loadAsync(decryptedBlob);
+        const files = Object.keys(content.files).slice(0, 10).join(', ');
+        log(`APK ${lastApk.name} містить: ${files}${Object.keys(content.files).length > 10 ? '...' : ''}`);
+      } catch (error) {
+        log(`Помилка аналізу: ${error.message}`);
+      }
+    }
+
+    async function cleanStorage() {
+      try {
+        const db = await getDB();
+        const apks = await db.getAll('apks');
+        const history = await db.getAll('history');
+        if (!apks.length && !history.length) {
+          log('Сховище порожнє');
+          return;
+        }
+
+        const tx = db.transaction(['apks', 'history'], 'readwrite');
+        await tx.objectStore('apks').clear();
+        await tx.objectStore('history').clear();
+        await tx.done;
+        log('Сховище очищено');
+      } catch (error) {
+        log(`Помилка очищення: ${error.message}`);
+      }
+    }
+
     async function showHistory() {
       try {
         const db = await getDB();
         const history = await db.getAll('history');
         if (!history.length) {
-          output.textContent = 'История загрузок пуста';
+          log('Історія порожня');
           return;
         }
 
-        output.innerHTML = '<h3>История загрузок:</h3>' + history
-          .map(item => 
+        output.innerHTML = '<h3>Історія завантажень:</h3>' + history
+          .map(item => `
             <div class="history-item">
               ${item.name} (${(item.size / 1024 / 1024).toFixed(2)} МБ)<br>
-              Загружен: ${new Date(item.date).toLocaleString()}
+              URL: <a href="${item.url}" target="_blank">${item.url}</a><br>
+              Завантажено: ${new Date(item.date).toLocaleString()}
             </div>
-          )
+          `)
           .join('');
       } catch (error) {
-        output.textContent = Ошибка загрузки истории: ${error.message};
+        log(`Помилка історії: ${error.message}`);
       }
     }
 
-    // Обработка ошибок при выборе файла
-    apkInput.addEventListener('change', () => {
-      const file = apkInput.files[0];
-      if (file) {
-        output.textContent = Выбран: ${file.name}. Нажмите "Сохранить APK".;
-      }
+    function toggleTheme() {
+      const currentTheme = getTheme();
+      const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+      applyTheme(newTheme);
+      log(`Тему змінено на ${newTheme === 'light' ? 'світлу' : 'темну'}`);
+    }
+
+    downloadBtn.addEventListener('click', () => downloadAndSaveApk(apkUrlInput.value.trim()));
+    proxyBtn.addEventListener('click', () => downloadAndSaveApk(apkUrlInput.value.trim(), true));
+    openBtn.addEventListener('click', openLastApk);
+    shareBtn.addEventListener('click', shareLastApk);
+    analyzeBtn.addEventListener('click', analyzeApk);
+    cleanBtn.addEventListener('click', cleanStorage);
+    themeToggle.addEventListener('click', toggleTheme);
+    historyBtn.addEventListener('click', showHistory);
+
+    apkSelect.addEventListener('change', () => {
+      apkUrlInput.value = apkSelect.value;
+      if (apkSelect.value) log(`Вибрано URL: ${apkSelect.value}`);
     });
+
+    apkUrlInput.addEventListener('input', () => {
+      const url = apkUrlInput.value.trim();
+      if (url) log(`URL: ${url}. Натисніть "Завантажити" або "Завантажити через проксі".`);
+    });
+
+    applyTheme(getTheme());
+    log('Додаток готовий. Вставте URL APK або виберіть зі списку.\nДля перевірки використовуйте "Відкрити", для установки — "Поділитися".');
+  </script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/apk-share/sw.js')
+        .then(() => console.log('Service Worker зареєстровано'))
+        .catch(err => console.error('Помилка Service Worker:', err));
+    }
   </script>
 </body>
 </html>
